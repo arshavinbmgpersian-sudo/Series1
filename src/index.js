@@ -1,130 +1,146 @@
-function generateCode(){
-  return "SUB-" + Math.random().toString(36).substring(2,10).toUpperCase();
+function generateCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "SUB-";
+  for (let i = 0; i < 10; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
 }
 
-export default {
-async fetch(request, env){
-
-const url = new URL(request.url);
-
-// CORS
 const cors = {
-"Access-Control-Allow-Origin":"*",
-"Access-Control-Allow-Methods":"POST,GET,OPTIONS",
-"Access-Control-Allow-Headers":"Content-Type"
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type"
 };
 
-if(request.method==="OPTIONS"){
-return new Response(null,{headers:cors});
-}
+export default {
+  async fetch(request, env) {
 
-/* =======================
-   ایجاد درخواست خرید
-======================= */
-if(request.method==="POST" && url.pathname==="/api/create"){
+    const url = new URL(request.url);
 
-const form = await request.formData();
+    // ✅ CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: cors });
+    }
 
-const phone = form.get("phone");
+    /* =========================
+       CREATE SUBSCRIPTION
+    ========================= */
+    if (request.method === "POST" && url.pathname === "/api/create-subscription") {
 
-// 🔴 چک: آیا قبلاً pending دارد؟
-const existing = await env.DB.prepare(`
-SELECT * FROM subscriptions
-WHERE phone = ? AND status = 'pending'
-`).bind(phone).first();
+      try {
 
-if(existing){
-return Response.json({
-success:false,
-message:"شما یک درخواست در حال بررسی دارید"
-},{headers:cors});
-}
+        const form = await request.formData();
 
-const code = generateCode();
+        const fullname = form.get("fullname") || "";
+        const phone = form.get("phone") || "";
+        const telegram_id = form.get("telegram_id") || "";
+        const plan = form.get("plan") || "";
+        const receipt = form.get("receipt");
 
-await env.DB.prepare(`
-INSERT INTO subscriptions
-(tracking_code, fullname, phone, telegram_id, plan, status)
-VALUES (?,?,?,?,?,?)
-`)
-.bind(
-code,
-form.get("fullname"),
-phone,
-form.get("telegram_id") || "",
-form.get("plan"),
-"pending"
-)
-.run();
+        // ❌ validation ساده
+        if (!phone || !plan) {
+          return Response.json({
+            success: false,
+            message: "اطلاعات ناقص است"
+          }, { headers: cors });
+        }
 
-// ارسال عکس برای تو (اختیاری)
-const receipt = form.get("receipt");
+        // ❌ جلوگیری از درخواست تکراری pending
+        const exists = await env.DB.prepare(`
+          SELECT * FROM subscriptions
+          WHERE phone = ? AND status = 'pending'
+        `).bind(phone).first();
 
-const tg = new FormData();
-tg.append("chat_id", env.CHAT_ID);
+        if (exists) {
+          return Response.json({
+            success: false,
+            message: "شما یک درخواست در حال بررسی دارید"
+          }, { headers: cors });
+        }
 
-tg.append("caption",
-`📥 درخواست جدید
+        const code = generateCode();
 
-👤 ${form.get("fullname")}
-📱 ${phone}
-📦 ${form.get("plan")}
-🆔 ${code}`
-);
+        // 💾 ذخیره در D1
+        await env.DB.prepare(`
+          INSERT INTO subscriptions
+          (tracking_code, fullname, phone, telegram_id, plan, status)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `)
+        .bind(code, fullname, phone, telegram_id, plan, "pending")
+        .run();
 
-if(receipt){
-tg.append("photo", receipt);
-}
+        // 📩 ارسال عکس برای تو (اختیاری)
+        const tg = new FormData();
 
-await fetch(
-`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`,
-{
-method:"POST",
-body:tg
-}
-);
+        tg.append("chat_id", env.CHAT_ID);
 
-return Response.json({
-success:true,
-tracking_code:code
-},{headers:cors});
-}
+        tg.append("caption",
+`📥 درخواست جدید اشتراک
 
-/* =======================
-   لیست برای ادمین
-======================= */
-if(request.method==="GET" && url.pathname==="/api/admin/list"){
+👤 نام: ${fullname}
+📱 موبایل: ${phone}
+💬 تلگرام: ${telegram_id || "ندارد"}
+📦 پلن: ${plan}
 
-const data = await env.DB.prepare(`
-SELECT * FROM subscriptions
-ORDER BY id DESC
-`).all();
+🆔 کد: ${code}
+⏳ وضعیت: pending`
+        );
 
-return Response.json(data.results,{headers:cors});
-}
+        if (receipt) {
+          tg.append("photo", receipt, "receipt.jpg");
+        }
 
-/* =======================
-   تایید / رد
-======================= */
-if(request.method==="POST" && url.pathname==="/api/admin/update"){
+        await fetch(
+          `https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`,
+          {
+            method: "POST",
+            body: tg
+          }
+        );
 
-const body = await request.json();
+        return Response.json({
+          success: true,
+          tracking_code: code
+        }, { headers: cors });
 
-await env.DB.prepare(`
-UPDATE subscriptions
-SET status = ?, activation_code = ?
-WHERE tracking_code = ?
-`)
-.bind(
-body.status,
-body.activation_code || "",
-body.code
-)
-.run();
+      } catch (err) {
+        return Response.json({
+          success: false,
+          message: "Server error"
+        }, { headers: cors });
+      }
+    }
 
-return Response.json({success:true},{headers:cors});
-}
+    /* =========================
+       STATUS CHECK
+    ========================= */
+    if (request.method === "GET" && url.pathname === "/api/status") {
 
-return new Response("OK");
-}
+      const tracking = url.searchParams.get("tracking");
+
+      const row = await env.DB.prepare(`
+        SELECT status, activation_code
+        FROM subscriptions
+        WHERE tracking_code = ?
+      `).bind(tracking).first();
+
+      if (!row) {
+        return Response.json({
+          found: false
+        }, { headers: cors });
+      }
+
+      return Response.json({
+        found: true,
+        status: row.status,
+        activation_code: row.activation_code
+      }, { headers: cors });
+    }
+
+    /* =========================
+       DEFAULT
+    ========================= */
+    return new Response("OK");
+  }
 };
