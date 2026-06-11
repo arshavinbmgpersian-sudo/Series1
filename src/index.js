@@ -1,184 +1,130 @@
-function trackingCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "SUB-";
-
-  for (let i = 0; i < 10; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
-
-  return code;
-}
-
-function activationCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "VIP-";
-
-  for (let i = 0; i < 8; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
-
-  return code;
+function generateCode(){
+  return "SUB-" + Math.random().toString(36).substring(2,10).toUpperCase();
 }
 
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+async fetch(request, env){
 
-    // ثبت اشتراک
-    if (
-      request.method === "POST" &&
-      url.pathname === "/api/create-subscription"
-    ) {
-      try {
-        const form = await request.formData();
+const url = new URL(request.url);
 
-        const fullname = form.get("fullname") || "";
-        const phone = form.get("phone") || "";
-        const telegramId = form.get("telegram_id") || "";
-        const plan = form.get("plan") || "";
-        const receipt = form.get("receipt");
+// CORS
+const cors = {
+"Access-Control-Allow-Origin":"*",
+"Access-Control-Allow-Methods":"POST,GET,OPTIONS",
+"Access-Control-Allow-Headers":"Content-Type"
+};
 
-        const code = trackingCode();
+if(request.method==="OPTIONS"){
+return new Response(null,{headers:cors});
+}
 
-        await env.DB.prepare(`
-          INSERT INTO subscriptions (
-            tracking_code,
-            fullname,
-            phone,
-            telegram_id,
-            plan,
-            status
-          )
-          VALUES (?, ?, ?, ?, ?, ?)
-        `)
-        .bind(
-          code,
-          fullname,
-          phone,
-          telegramId,
-          plan,
-          "pending"
-        )
-        .run();
+/* =======================
+   ایجاد درخواست خرید
+======================= */
+if(request.method==="POST" && url.pathname==="/api/create"){
 
-        if (receipt) {
-          const tg = new FormData();
+const form = await request.formData();
 
-          tg.append("chat_id", env.CHAT_ID);
+const phone = form.get("phone");
 
-          tg.append(
-            "caption",
-`🎬 درخواست اشتراک جدید
+// 🔴 چک: آیا قبلاً pending دارد؟
+const existing = await env.DB.prepare(`
+SELECT * FROM subscriptions
+WHERE phone = ? AND status = 'pending'
+`).bind(phone).first();
 
-👤 ${fullname}
+if(existing){
+return Response.json({
+success:false,
+message:"شما یک درخواست در حال بررسی دارید"
+},{headers:cors});
+}
+
+const code = generateCode();
+
+await env.DB.prepare(`
+INSERT INTO subscriptions
+(tracking_code, fullname, phone, telegram_id, plan, status)
+VALUES (?,?,?,?,?,?)
+`)
+.bind(
+code,
+form.get("fullname"),
+phone,
+form.get("telegram_id") || "",
+form.get("plan"),
+"pending"
+)
+.run();
+
+// ارسال عکس برای تو (اختیاری)
+const receipt = form.get("receipt");
+
+const tg = new FormData();
+tg.append("chat_id", env.CHAT_ID);
+
+tg.append("caption",
+`📥 درخواست جدید
+
+👤 ${form.get("fullname")}
 📱 ${phone}
-💬 ${telegramId || "ندارد"}
-📦 ${plan}
-
+📦 ${form.get("plan")}
 🆔 ${code}`
-          );
+);
 
-          tg.append(
-            "photo",
-            receipt,
-            receipt.name || "receipt.jpg"
-          );
+if(receipt){
+tg.append("photo", receipt);
+}
 
-          await fetch(
-            `https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`,
-            {
-              method: "POST",
-              body: tg
-            }
-          );
-        }
+await fetch(
+`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`,
+{
+method:"POST",
+body:tg
+}
+);
 
-        return Response.json({
-          success: true,
-          tracking_code: code
-        });
+return Response.json({
+success:true,
+tracking_code:code
+},{headers:cors});
+}
 
-      } catch (e) {
-        return Response.json({
-          success: false,
-          error: e.message
-        });
-      }
-    }
+/* =======================
+   لیست برای ادمین
+======================= */
+if(request.method==="GET" && url.pathname==="/api/admin/list"){
 
-    // وضعیت اشتراک
-    if (
-      request.method === "GET" &&
-      url.pathname === "/api/status"
-    ) {
-      const tracking =
-        url.searchParams.get("tracking");
+const data = await env.DB.prepare(`
+SELECT * FROM subscriptions
+ORDER BY id DESC
+`).all();
 
-      const row = await env.DB.prepare(`
-        SELECT
-          status,
-          activation_code
-        FROM subscriptions
-        WHERE tracking_code = ?
-      `)
-      .bind(tracking)
-      .first();
+return Response.json(data.results,{headers:cors});
+}
 
-      if (!row) {
-        return Response.json({
-          found: false
-        });
-      }
+/* =======================
+   تایید / رد
+======================= */
+if(request.method==="POST" && url.pathname==="/api/admin/update"){
 
-      return Response.json({
-        found: true,
-        status: row.status,
-        activation_code: row.activation_code
-      });
-    }
+const body = await request.json();
 
-    // تایید دستی
-    if (
-      request.method === "POST" &&
-      url.pathname === "/api/admin/approve"
-    ) {
-      const key =
-        request.headers.get("x-admin-key");
+await env.DB.prepare(`
+UPDATE subscriptions
+SET status = ?, activation_code = ?
+WHERE tracking_code = ?
+`)
+.bind(
+body.status,
+body.activation_code || "",
+body.code
+)
+.run();
 
-      if (key !== env.ADMIN_KEY) {
-        return new Response(
-          "Unauthorized",
-          { status: 401 }
-        );
-      }
+return Response.json({success:true},{headers:cors});
+}
 
-      const body =
-        await request.json();
-
-      const vip =
-        activationCode();
-
-      await env.DB.prepare(`
-        UPDATE subscriptions
-        SET
-          status='approved',
-          activation_code=?
-        WHERE tracking_code=?
-      `)
-      .bind(
-        vip,
-        body.tracking_code
-      )
-      .run();
-
-      return Response.json({
-        success: true,
-        activation_code: vip
-      });
-    }
-
-    return new Response(
-      "SeriexDL Subscription API"
-    );
-  }
+return new Response("OK");
+}
 };
