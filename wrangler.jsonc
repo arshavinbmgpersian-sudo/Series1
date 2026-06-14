@@ -10,5 +10,10 @@
       "database_name": "seriexdl-vip",
       "database_id": "51f27053-4149-4d53-8755-5c4809a0ee50"
     }
+{
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}
   ]
 }
